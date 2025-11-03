@@ -5,18 +5,15 @@ import os
 import matplotlib.pyplot as plt
 
 def read_omr_advanced(image_path):
-    """
-    Đọc phiếu trắc nghiệm phức tạp (50 câu hoặc nhiều hơn)
-    Hỗ trợ: phiếu 2 cột, có số báo danh, mã đề thi
-    """
 
-    print(f"Đọc ảnh: {image_path}")
+    print(f"Đã đọc ảnh: {image_path}")
     image = cv2.imread(image_path)
+    height, width = image.shape[:2]
     if image is None:
         print(f"❌ Không thể đọc file: {image_path}")
         return None
 
-    print(f"Kích thước ảnh: {image.shape[1]}x{image.shape[0]} pixels")
+    print(f"Kích thước ảnh: {width}x{height} pixels")
 
     # Tiền xử lý ảnh
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -36,10 +33,7 @@ def read_omr_advanced(image_path):
     kernel = np.ones((2, 2), np.uint8)
     thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
 
-    # Hiển thị ảnh xử lý với kích thước gốc
-    display = image.copy()
-    # cv2.imshow("Original", image)
-    # cv2.imshow("Processed", thresh)
+    display = cv2.cvtColor(blurred, cv2.COLOR_GRAY2BGR)
 
     # Tìm contours
     contours, hierarchy = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
@@ -80,7 +74,8 @@ def read_omr_advanced(image_path):
     # Nhóm theo cột X
     all_x = sorted([c['center'][0] for c in circles])
     x_groups = []
-    x_tolerance = 12
+    x_tolerance = 12 * (width / 1000)
+    max_spacing = 60 * (width / 1000)
 
     for x in all_x:
         added = False
@@ -95,6 +90,14 @@ def read_omr_advanced(image_path):
     # Lấy các cột có >= 5 vòng tròn
     column_positions = sorted([np.mean(g) for g in x_groups if len(g) >= 5])
 
+    if len(column_positions) >= 2:
+     gaps = [column_positions[k+1] - column_positions[k] for k in range(len(column_positions)-1)]
+    # dùng median để chống nhiễu, nhân 1.5 để nới nhẹ
+     max_spacing = max(40, int(1.5 * np.median(gaps)))
+    else:
+    # chỉ 1 cột -> cho spacing thật lớn để không loại nhóm 1 cột
+     max_spacing = width
+
     # PHÂN LOẠI CÁC VÙNG
     # Tìm nhóm 4-5 cột liên tiếp (đáp án A,B,C,D hoặc A,B,C,D,E)
     answer_column_groups = []
@@ -104,7 +107,7 @@ def read_omr_advanced(image_path):
         j = i + 1
         while j < len(column_positions):
             spacing = column_positions[j] - group[-1]
-            if spacing < 60:  # Khoảng cách giữa các cột đáp án
+            if spacing < max_spacing:  # Khoảng cách giữa các cột đáp án
                 group.append(column_positions[j])
                 j += 1
             else:
@@ -250,30 +253,23 @@ def read_omr_advanced(image_path):
 
     else:
         # PHIẾU ĐƠN GIẢN 1 CỘT - ĐỌC THEO HÀNG
+
         valid_circles.sort(key=lambda c: c['y'])
+        rows, current_row = [], []
 
-        rows = []
-        current_row = []
-        y_tolerance = 20
-
-        for circle in valid_circles:
-            if len(current_row) == 0:
-                current_row.append(circle)
+        # Nhóm theo hàng
+        for item in valid_circles:
+            if not current_row or abs(item['y'] - current_row[0]['y']) <= 20:
+                current_row.append(item)
             else:
-                if abs(circle['y'] - current_row[0]['y']) <= y_tolerance:
-                    current_row.append(circle)
-                else:
-                    if len(current_row) >= 3:
-                        rows.append(current_row)
-                    current_row = [circle]
-
+                if len(current_row) >= 3:
+                    rows.append(current_row)
+                current_row = [item]
         if len(current_row) >= 3:
             rows.append(current_row)
 
         answers = []
-
-        for row_idx, row in enumerate(rows):
-            # Nhóm theo column_group
+        for row in rows:
             groups = {}
             for circle in row:
                 group_id = circle.get('column_group', 0)
@@ -281,115 +277,70 @@ def read_omr_advanced(image_path):
                     groups[group_id] = []
                 groups[group_id].append(circle)
 
-            # Xử lý từng nhóm
-            for group_id, group_circles in sorted(groups.items()):
+            for group_circles in groups.values():
                 if len(group_circles) < 3:
                     continue
 
-                # Sắp xếp theo cột trong nhóm
-                group_circles.sort(key=lambda c: c['column_in_group'])
-
-                # ĐẢM BẢO CHỈ CÓ 1 VÒNG TRÒN MỖI CỘT
+                # Loại bỏ trùng lặp theo cột
                 unique_circles = {}
                 for circle in group_circles:
                     col_idx = circle['column_in_group']
                     if col_idx not in unique_circles:
                         unique_circles[col_idx] = circle
 
-                # Chuyển về danh sách và sắp xếp lại
-                group_circles = sorted(unique_circles.values(), key=lambda c: c['column_in_group'])
-
-                # Bỏ qua nếu không đủ 3-5 cột
-                if len(group_circles) < 3:
+                row_circles = sorted(unique_circles.values(), key=lambda c: c['column_in_group'])
+                if len(row_circles) < 3:
                     continue
 
-                # Tìm ô đậm nhất VÀ ô sáng nhất
-                darkest = min(group_circles, key=lambda c: c['intensity'])
-                lightest = max(group_circles, key=lambda c: c['intensity'])
-
-                # Kiểm tra xem có đậm hơn đáng kể so với các ô khác không
-                intensities = [c['intensity'] for c in group_circles]
+                # Tìm vòng tròn đậm nhất
+                darkest = min(row_circles, key=lambda c: c['intensity'])
+                intensities = [c['intensity'] for c in row_circles]
                 avg_intensity = np.mean(intensities)
-                std_intensity = np.std(intensities)
-                intensity_range = lightest['intensity'] - darkest['intensity']
+                intensity_range = max(intensities) - min(intensities)
 
-                # TIÊU CHÍ MỚI - SO SÁNH TƯƠNG ĐỐI
-                # Giảm threshold cho phù hợp với nhiều loại phiếu
-                has_clear_difference = intensity_range > 6  # Giảm từ 25 -> 6
-                is_much_darker = (avg_intensity - darkest['intensity']) > 3  # Giảm từ 18 -> 3
-                has_variation = std_intensity > 2  # Giảm từ 12 -> 2
-
-                # Chỉ chấp nhận nếu có SỰ KHÁC BIỆT RÕ RÀNG
-                if (has_clear_difference and is_much_darker) or (has_variation and is_much_darker):
+                # Kiểm tra có đáp án rõ ràng không
+                if intensity_range > 6 and (avg_intensity - darkest['intensity']) > 3:
                     answer_index = darkest['column_in_group']
-
-                    # Vẽ lên ảnh
                     x, y, w, h = darkest['x'], darkest['y'], darkest['w'], darkest['h']
+
                     cv2.drawContours(display, [darkest['contour']], -1, (0, 0, 255), 2)
                     cv2.circle(display, darkest['center'], 3, (0, 255, 0), -1)
-
-                    letter_map = ['A', 'B', 'C', 'D', 'E']
-                    letter = letter_map[answer_index] if answer_index < len(letter_map) else '?'
-
-                    question_num = len(answers) + 1
-                    cv2.putText(display, f"{question_num}:{letter}", (x-30, y+h//2),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 0), 1)
-
+                    letter = ['A', 'B', 'C', 'D', 'E'][answer_index]
+                    cv2.putText(display, f"{len(answers) + 1}:{letter}", (x - 30, y + h // 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 0), 1)
                     answers.append(answer_index)
 
-    # Trả về cả answers và display image
     return answers, image, display
 
 
 def main():
-    # Nhập file
     if len(sys.argv) > 1:
         image_path = sys.argv[1]
     else:
         image_path = input("Nhập tên file ảnh: ").strip()
 
     if not os.path.exists(image_path):
-        print(f"❌ File không tồn tại: {image_path}")
+        print(f"❌ Ảnh {image_path} không tồn tại!")
         return
 
-    # Đọc phiếu
-    result = read_omr_advanced(image_path)
+    read = read_omr_advanced(image_path)
 
-    if result is None:
+    if read is None:
         print("\n❌ Không đọc được đáp án")
         return
 
-    answers, original_img, marked_img = result
+    answers, original_img, marked_img = read
 
     if answers and len(answers) > 0:
-        # Chuyển đổi thành chữ cái
-        letter_map = ['A', 'B', 'C', 'D', 'E']
-        result_letters = [letter_map[ans] if 0 <= ans < len(letter_map) else '?' for ans in answers]
-
-        # In kết quả đơn giản
+        list_answers = ['A', 'B', 'C', 'D', 'E']
+        result_answers = [list_answers[ans] if 0 <= ans < len(list_answers) else '?' for ans in answers]
         print("\n✅ ĐÁP ÁN:")
-        print(result_letters)
-
-        # Hiển thị ảnh gốc và ảnh đã khoanh bằng matplotlib
-        fig, axes = plt.subplots(1, 2, figsize=(16, 10))
-
-        # Chuyển từ BGR sang RGB cho matplotlib
-        original_rgb = cv2.cvtColor(original_img, cv2.COLOR_BGR2RGB)
-        marked_rgb = cv2.cvtColor(marked_img, cv2.COLOR_BGR2RGB)
-
-        axes[0].imshow(original_rgb)
-        axes[0].set_title('Ảnh gốc', fontsize=14)
-        axes[0].axis('off')
-
-        axes[1].imshow(marked_rgb)
-        axes[1].set_title('Ảnh đã khoanh đáp án', fontsize=14)
-        axes[1].axis('off')
-
-        plt.tight_layout()
+        print(result_answers)
+        plt.subplot(121), plt.imshow(cv2.cvtColor(original_img, cv2.COLOR_BGR2RGB)), plt.title('Ảnh gốc', fontsize=14), plt.axis( 'off')
+        plt.subplot(122), plt.imshow(cv2.cvtColor(marked_img, cv2.COLOR_BGR2RGB)), plt.title('Ảnh đã khoanh đáp án', fontsize=14), plt.axis( 'off')
         plt.show()
     else:
         print("\n❌ Không đọc được đáp án")
-
 
 if __name__ == "__main__":
     main()
